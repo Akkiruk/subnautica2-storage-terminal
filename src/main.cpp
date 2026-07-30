@@ -1078,9 +1078,20 @@ class StorageTerminalMod final : public CppUserModBase {
         log(L"Storage Network open. Type to search; PAGE UP/DOWN browse the lockers holding it; Escape closes.");
     }
 
-    // Mod-INITIATED close: the mod both pops the screen and releases its state.
-    // Used by the NoA toggle (picking the option again while already open),
-    // where nothing else is trying to close anything.
+    // Closes the screen: pop it, then release our state.
+    //
+    // The mod MUST do the pop. Letting the game close its own screen on Escape
+    // was tried and confirmed broken in game (2026-07-29, UE4SS.log line 1071):
+    // the mod logged "released", stood down, and the screen just stayed on
+    // screen -- the game does not route Escape to a storage screen that was
+    // opened through the interact hijack. Standing down also cleared
+    // m_screenOpen, which silently killed the arrow/Page keys for the rest of
+    // the session, because every handler starts with reconcile_screen_state().
+    //
+    // The earlier "mouse stops working" report was NOT caused by this pop. It
+    // was the browse path popping and then failing to open a replacement (see
+    // request_locker) -- the player noticed the dead mouse after closing, which
+    // is what made the close look guilty.
     void close_screen()
     {
         if (!reconcile_screen_state()) {
@@ -1090,27 +1101,6 @@ class StorageTerminalMod final : public CppUserModBase {
         pop_modal_screen(find_window_manager());
         forget_screen();
         log(L"Storage Network closed.");
-    }
-
-    // Escape: release WITHOUT popping.
-    //
-    // The screen the mod opens is the game's own native storage screen, and the
-    // game already closes it on Escape -- including whatever it does to restore
-    // mouse/input mode afterwards. Popping it ourselves on the same keypress
-    // meant two closers racing for one screen, and the game's own path is the
-    // only one that puts input back. So the mod just stands down and lets the
-    // game close its screen the way it always does.
-    //
-    // The grid flag is restored first, while the screen is verifiably still up
-    // and the widget is therefore safe to write to.
-    void release_screen()
-    {
-        if (!reconcile_screen_state()) {
-            return;
-        }
-        restore_touched_grid();
-        forget_screen();
-        log(L"Storage Network released; the game closes its own screen.");
     }
 
     // ---- input ----------------------------------------------------------
@@ -1218,7 +1208,7 @@ public:
         // walking up to a NoA terminal and picking her dialogue option, so the
         // base's storage index is something the base gives you, not something
         // you carry around the world. Escape stays bound purely to close.
-        register_keydown_event(Input::Key::ESCAPE, [this]() { release_screen(); });
+        register_keydown_event(Input::Key::ESCAPE, [this]() { close_screen(); });
         for (int32_t offset = 0; offset < 26; ++offset) {
             const auto key = static_cast<Input::Key>(static_cast<uint8_t>(Input::Key::A) + offset);
             const wchar_t character = static_cast<wchar_t>(L'a' + offset);

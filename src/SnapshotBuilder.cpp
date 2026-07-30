@@ -25,7 +25,11 @@ FProperty* find_first_array_property(UFunction* function)
         return nullptr;
     }
 
-    for (FProperty* property : function->ForEachProperty()) {
+    // TFieldRange with None matches what the deprecated ForEachProperty() did
+    // (UStruct.cpp: TFieldRange<FProperty>(this, EFieldIterationFlags::None)) --
+    // this function's OWN params only, which is exactly right for a UFunction's
+    // parameter list. Deliberately not IncludeSuper here.
+    for (FProperty* property : TFieldRange<FProperty>(function, EFieldIterationFlags::None)) {
         if (CastField<FArrayProperty>(property)) {
             return property;
         }
@@ -213,13 +217,19 @@ const SnapshotBuilder::ItemTypeNames* SnapshotBuilder::resolve_item_type_names(U
         return nullptr;
     }
 
-    // Cache hit: no GetName(), no FText::ToString(), no allocation at all.
-    if (const auto cached = m_itemTypeNames.find(item_type); cached != m_itemTypeNames.end()) {
+    // Cache hit with a real localized name: nothing to do, and no allocation.
+    // A hit that is still on the asset-name fallback falls through and retries
+    // the FText -- see ItemTypeNames::display_name_resolved.
+    const auto cached = m_itemTypeNames.find(item_type);
+    if (cached != m_itemTypeNames.end() && cached->second.display_name_resolved) {
         return &cached->second;
     }
 
-    if (!m_itemDisplayNameFieldResolved) {
-        m_itemDisplayNameFieldResolved = true;
+    // Not latched on failure. The field is resolved from whatever item type
+    // happens to be seen first, and early in world load that read can fail --
+    // latching there meant the mod searched asset names for the whole session.
+    // find_property is memoized by UE4SS, so retrying costs a hash probe.
+    if (!m_itemDisplayNameField) {
         for (const auto candidate : StorageTerminalTargets::kItemDisplayNameCandidates) {
             auto* field = PropertyReflection::find_property(item_type->GetClassPrivate(), candidate);
             if (field && PropertyReflection::read_text(field, reinterpret_cast<const uint8_t*>(item_type))) {
@@ -227,30 +237,41 @@ const SnapshotBuilder::ItemTypeNames* SnapshotBuilder::resolve_item_type_names(U
                 break;
             }
         }
-        if (!m_itemDisplayNameField) {
+        if (!m_itemDisplayNameField && !m_itemDisplayNameFieldResolved) {
+            m_itemDisplayNameFieldResolved = true; // log once, keep retrying
             Output::send<LogLevel::Verbose>(
-                STR("[StorageTerminal] UWEItemType display name not found; searching asset names only.\n"));
+                STR("[StorageTerminal] UWEItemType display name not readable yet; using asset names until it is.\n"));
         }
     }
 
-    ItemTypeNames names{};
-    names.asset_name = ReflectionUtils::safe_name(item_type);
-
+    std::wstring display_name;
+    bool resolved = false;
     if (m_itemDisplayNameField) {
         // The field is resolved from one item type, but every UUWEItemType
         // shares the same class, so the same FProperty is valid for all of them.
         auto text = PropertyReflection::read_text(
             m_itemDisplayNameField, reinterpret_cast<const uint8_t*>(item_type)).value_or(std::wstring{});
         if (is_usable_display_text(text)) {
-            names.display_name = std::move(text);
+            display_name = std::move(text);
+            resolved = true;
         }
     }
 
-    // An item whose FText is missing or is a string-table placeholder falls
-    // back to the asset name, so it is still searchable and still readable.
-    if (names.display_name.empty()) {
-        names.display_name = names.asset_name;
+    if (cached != m_itemTypeNames.end()) {
+        // Upgrade the existing fallback entry in place, if we can now do better.
+        if (resolved) {
+            cached->second.display_name = std::move(display_name);
+            cached->second.display_name_resolved = true;
+        }
+        return &cached->second;
     }
+
+    ItemTypeNames names{};
+    names.asset_name = ReflectionUtils::safe_name(item_type);
+    // An item whose FText is missing or is a string-table placeholder falls back
+    // to the asset name, so it stays searchable and readable meanwhile.
+    names.display_name = resolved ? std::move(display_name) : names.asset_name;
+    names.display_name_resolved = resolved;
 
     return &m_itemTypeNames.emplace(item_type, std::move(names)).first->second;
 }

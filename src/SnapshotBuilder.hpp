@@ -71,6 +71,20 @@ private:
     struct ItemTypeNames {
         std::wstring display_name;
         std::wstring asset_name;
+
+        // True only when display_name came from a genuinely usable FText.
+        //
+        // This flag exists because caching without it was a real regression
+        // (2026-07-29): the first snapshot of a session runs while the world is
+        // still loading, when some item types' localized FTexts do not resolve
+        // yet. Those types fell back to the asset name -- and the cache then
+        // made that permanent, so the player saw "DA_Copper_ItemType" instead of
+        // "Copper" for the whole session. The pre-cache code re-read the FText
+        // on every rebuild and so healed itself a second later.
+        //
+        // A fallback entry is therefore retried on later rebuilds and upgraded
+        // in place once the real name becomes readable.
+        bool display_name_resolved = false;
     };
 
     // Item names keyed by the UUWEItemType they came from.

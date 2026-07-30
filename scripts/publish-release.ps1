@@ -21,8 +21,10 @@
 
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    # CurseForge numeric project id. Find it on the project page sidebar.
-    [string]$ProjectId = $env:CURSEFORGE_PROJECT_ID,
+    # CurseForge numeric project id. Not a secret -- it is visible in the
+    # authors.curseforge.com project URL, so it is fine to keep in the repo.
+    # Override with -ProjectId or CURSEFORGE_PROJECT_ID.
+    [string]$ProjectId = $(if ($env:CURSEFORGE_PROJECT_ID) { $env:CURSEFORGE_PROJECT_ID } else { "1631229" }),
 
     # The CurseForge host for this game. Upload URIs are relative to the site
     # the project lives on, so this differs per game and must match the project.
@@ -179,13 +181,27 @@ if ([string]::IsNullOrWhiteSpace($ProjectId)) {
     return
 }
 
+# Game versions. If none were passed, resolve them: when the game has exactly
+# one version (Subnautica 2 currently has just id 6952 "1.0"), tagging it is
+# unambiguous. If it ever has more, refuse to guess -- silently claiming
+# compatibility with every version would be worse than asking.
+if ($GameVersionIds.Count -eq 0) {
+    $available = Test-CurseForgeAuth
+    if ($available.Count -eq 1) {
+        $GameVersionIds = @([int]$available[0].id)
+        Write-Host "Tagging game version $($available[0].name) (id $($available[0].id))."
+    } else {
+        throw "The game now has $($available.Count) versions, so -GameVersionIds must be given explicitly. Run -CheckAuth to list them."
+    }
+}
+
 $metadata = @{
     changelog     = $changelog
     changelogType = "markdown"
     displayName   = "StorageTerminal $version"
     releaseType   = $ReleaseType
+    gameVersions  = $GameVersionIds
 }
-if ($GameVersionIds.Count -gt 0) { $metadata.gameVersions = $GameVersionIds }
 $metadataJson = $metadata | ConvertTo-Json -Compress -Depth 5
 
 $uploadUri = "$ApiHost/api/projects/$ProjectId/upload-file"
