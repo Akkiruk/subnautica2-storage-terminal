@@ -1,0 +1,65 @@
+# ---------------------------------------------------------------------------
+# SECRETS -- never commit credentials.
+#
+# The CurseForge token is read from the CURSEFORGE_TOKEN environment variable
+# (see scripts/publish-release.ps1). It is deliberately NOT stored in any file
+# in this repo. These patterns exist so that a local convenience file can never
+# be committed by accident.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.token
+*.secret
+secrets.*
+*credentials*
+curseforge-token*
+
+# ---------------------------------------------------------------------------
+# vendor/ -- THIRD-PARTY AND GAME-DERIVED CODE. DO NOT COMMIT.
+#
+# 2.7 GB total, and two parts of it must never be published:
+#
+#   vendor/SN2SDK      A Dumper-7 decompiled SDK of Subnautica 2 -- the game's
+#                      entire class/field layout, derived from the shipped
+#                      binaries. Redistributing it is a copyright/ToS problem
+#                      regardless of how useful it is locally.
+#   vendor/RE-UE4SS-src A full clone of UE4SS plus its build tree. It is a
+#                      dependency to be cloned, not vendored into this repo.
+#
+# See README for how to recreate vendor/ from scratch.
+# ---------------------------------------------------------------------------
+vendor/
+
+# ---------------------------------------------------------------------------
+# Build output and logs
+# ---------------------------------------------------------------------------
+build/
+build_vs/
+out/
+dist/
+*.dll
+*.pdb
+*.exp
+*.lib
+*.obj
+*.ilk
+*.log
+UE4SS.log
+
+# ---------------------------------------------------------------------------
+# Game/user data that can leak save contents or local paths
+# ---------------------------------------------------------------------------
+*.sav
+_copilot_backup_*/
+
+# ---------------------------------------------------------------------------
+# Editor / OS
+# ---------------------------------------------------------------------------
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+desktop.ini
+.DS_Store
