@@ -26,7 +26,11 @@ param(
 
     # The CurseForge host for this game. Upload URIs are relative to the site
     # the project lives on, so this differs per game and must match the project.
-    [string]$ApiHost = $(if ($env:CURSEFORGE_HOST) { $env:CURSEFORGE_HOST } else { "https://subnautica2.curseforge.com" }),
+    #
+    # Verified 2026-07-29: the game slug is "subnautica-2" (hyphenated -- the
+    # unhyphenated form 404s), and GET /api/game/versions on this host returns
+    # 401 rather than 404, confirming the endpoint exists and only needs auth.
+    [string]$ApiHost = $(if ($env:CURSEFORGE_HOST) { $env:CURSEFORGE_HOST } else { "https://subnautica-2.curseforge.com" }),
 
     [ValidateSet("release", "beta", "alpha")]
     [string]$ReleaseType = "release",
