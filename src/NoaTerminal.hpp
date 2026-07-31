@@ -88,14 +88,7 @@ private:
     std::atomic<RC::Unreal::UObject*> m_pendingComponent{nullptr};
     std::atomic<bool> m_openRequested{false};
 
-    bool m_loggedReferenceFields = false;
-
     RC::Unreal::UObject* create_option_for(RC::Unreal::UObject* component);
-
-    // One-shot diagnostic: dumps the three FText fields of the game's own
-    // dialogue options, so the field the button actually renders can be
-    // identified from real data instead of guessed at again.
-    void log_reference_option_fields(RC::Unreal::UObject* component);
 
     // Writes the option's label/response and verifies it by reading back.
     // Re-run on every rescan: UE4SS copies FText without taking a reference,

@@ -33,19 +33,31 @@ void log_line(const std::wstring& message)
 
 }
 
-// Writes InputText/ResponseText and VERIFIES the write by reading it back.
+// Writes the option's label and response, and verifies by reading back.
 //
-// Why this is not just "write it once": UE4SS copies FText shallowly and, by
-// its own admission in FText.cpp, "we were treating FText as a POD type
-// anyway" -- the assignment never takes a reference on the underlying shared
-// text data. A mod-built FText that is consumed immediately (the screen title,
-// handed straight to ProcessEvent) is fine; one parked in a long-lived UObject
-// field for minutes before the UI reads it is not. In game the option button
-// rendered, and rendered BLANK (2026-07-29).
+// THE BLANK-BUTTON BUG, AND WHAT ACTUALLY FIXED IT (resolved 2026-07-30):
 //
-// So: write, read back, and report. Callers re-run this on every terminal
-// rescan, so a field that comes back empty gets rewritten rather than staying
-// blank forever.
+// For several sessions the option appeared in NoA's menu but rendered with no
+// text. The cause was mundane: UUWEComputerTextInterfaceDialogueData has THREE
+// FTexts -- InputPrompt (0x48), InputText (0x58), ResponseText (0x68) -- and
+// the mod only ever wrote InputText. Writing InputPrompt as well fixed it.
+// Confirmed working in game.
+//
+// Both label fields are still written. Which one WBP_CTI_Button_C binds is
+// decided in Blueprint bytecode the SDK dump does not expose, so this does not
+// claim to know; writing both is harmless and removes the guesswork.
+//
+// A TRAP FOR THE NEXT READER: reading these fields back on the GAME's own
+// options returns the literal "<MISSING STRING TABLE ENTRY>" for all three,
+// even on options that render perfectly on screen. That is only UE4SS's
+// FText::ToString() failing to resolve string-table-backed text from a mod's
+// context (see the seventeenth lesson in feedback_ue4ss_reflection_bugs) -- it
+// says NOTHING about which field the widget uses. That placeholder was briefly
+// mistaken for proof that the widget ignores these properties entirely, which
+// nearly led to ripping out the fix that had already solved the problem.
+//
+// Callers re-run this on every terminal rescan, so a field that somehow comes
+// back wrong gets rewritten rather than staying blank forever.
 bool NoaTerminal::ensure_option_text(UObject* data)
 {
     if (ReflectionUtils::is_dead(data)) {
@@ -98,83 +110,6 @@ bool NoaTerminal::ensure_option_text(UObject* data)
         return false;
     }
     return true;
-}
-
-// Logs what the GAME's own working dialogue options hold in each of the three
-// FText fields, once per session.
-//
-// This exists because the option button kept rendering blank while our write
-// verifiably landed in InputText. Rather than guess again at which field the
-// button binds, this prints the real values from options that DO render
-// ("Missing Colonists", "Survival Guide", ...) so the field can be identified
-// from evidence. Pure reads, first terminal only, one time.
-void NoaTerminal::log_reference_option_fields(UObject* component)
-{
-    if (m_loggedReferenceFields || ReflectionUtils::is_dead(component)) {
-        return;
-    }
-    // NOT latched here. The array can still be unpopulated on the first rescan
-    // after world load, and latching on that would mean the diagnostic never
-    // runs -- the same "gave up after one attempt" mistake this project has
-    // made three times. The flag is set only once something is actually logged.
-
-    // Sample ExtraRootDialogueData, NOT DefaultRootDialogueData.
-    //
-    // Confirmed in game (2026-07-30, UE4SS.log line 1052): DefaultRootDialogueData
-    // is EMPTY on these components. The options the player actually sees --
-    // "Missing Colonists", "Survival Guide" and the rest -- live in
-    // ExtraRootDialogueData, which is the very array the mod appends to. So the
-    // game's own working options sit right beside ours, in the same array, and
-    // are the correct reference for which FText field carries the label.
-    auto* extra_field = PropertyReflection::find_property(
-        component->GetClassPrivate(), StorageTerminalTargets::kFieldExtraRootDialogueData);
-    if (!extra_field) {
-        log_line(L"NoA: no ExtraRootDialogueData to sample.");
-        return;
-    }
-
-    const auto view = PropertyReflection::read_array(extra_field, reinterpret_cast<uint8_t*>(component));
-    if (!view || !view->data || view->count <= 0) {
-        log_line(L"NoA: ExtraRootDialogueData is empty; nothing to sample.");
-        return;
-    }
-
-    log_line(L"NoA: sampling the game's own options (of " + std::to_wstring(view->count)
-             + L") to find which FText field is the label:");
-
-    int32_t sampled = 0;
-    for (int32_t index = 0; index < view->count && sampled < 4; ++index) {
-        UObject* option = nullptr;
-        std::memcpy(&option, view->element_at(index), sizeof(option));
-        if (ReflectionUtils::is_dead(option)) {
-            continue;
-        }
-        // Skip our own options -- they are the ones rendering blank, so they
-        // are the question, not the reference.
-        const bool ours = std::any_of(m_options.begin(), m_options.end(), [&](const TerminalOption& o) {
-            return o.data == option;
-        });
-        if (ours) {
-            continue;
-        }
-        ++sampled;
-        auto* option_class = option->GetClassPrivate();
-        auto* base = reinterpret_cast<uint8_t*>(option);
-
-        const auto read_field = [&](std::wstring_view name) -> std::wstring {
-            auto* field = PropertyReflection::find_property(option_class, name);
-            return field ? PropertyReflection::read_text(field, base).value_or(std::wstring{}) : std::wstring{L"<no field>"};
-        };
-
-        log_line(L"  [" + std::to_wstring(index) + L"] InputPrompt='" + read_field(StorageTerminalTargets::kFieldInputPrompt)
-                 + L"' InputText='" + read_field(StorageTerminalTargets::kFieldInputText)
-                 + L"' ResponseText='" + read_field(StorageTerminalTargets::kFieldResponseText) + L"'");
-    }
-
-    // Latch only on success, so an empty array early in world load is retried.
-    if (sampled > 0) {
-        m_loggedReferenceFields = true;
-    }
 }
 
 UObject* NoaTerminal::create_option_for(UObject* component)
@@ -259,7 +194,6 @@ int32_t NoaTerminal::refresh_terminals()
         }
         auto* base = reinterpret_cast<uint8_t*>(component);
 
-        log_reference_option_fields(component);
 
         // Is this terminal already carrying OUR option? The authoritative test
         // is the component's own array, not our bookkeeping -- the array cannot

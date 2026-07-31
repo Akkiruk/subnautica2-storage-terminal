@@ -144,20 +144,15 @@ inline constexpr std::wstring_view kCloseUI = L"CloseUI";
 // Fields set on our own dialogue-option data object.
 //
 // UUWEComputerTextInterfaceDialogueData carries THREE FTexts: InputPrompt
-// (0x48), InputText (0x58) and ResponseText (0x68). The option button is
-// WBP_CTI_Button_C, which holds a DialogueData plus a CommonTextBlock and fills
-// the text in its Blueprint Construct() -- so which field becomes the visible
-// label is in Blueprint bytecode and is NOT visible in the SDK dump.
+// (0x48), InputText (0x58) and ResponseText (0x68).
 //
-// The mod wrote only InputText and the button rendered blank, repeatedly. Since
-// the write itself verifiably lands (it is read back), the label must come from
-// another field, so both InputPrompt and InputText are now set to the label.
-// kFieldDefaultRootDialogueData is read purely to log what the GAME's own
-// working options hold in each field, which settles it from real data.
+// The mod wrote only InputText for several sessions and the button rendered
+// BLANK. Writing InputPrompt as well fixed it -- confirmed in game 2026-07-30.
+// Both are still written: which one WBP_CTI_Button_C binds is decided in
+// Blueprint bytecode the SDK dump does not expose. See ensure_option_text().
 inline constexpr std::wstring_view kFieldInputPrompt = L"InputPrompt";
 inline constexpr std::wstring_view kFieldInputText = L"InputText";
 inline constexpr std::wstring_view kFieldResponseText = L"ResponseText";
-inline constexpr std::wstring_view kFieldDefaultRootDialogueData = L"DefaultRootDialogueData";
 
 // --- scoping the search to reachable storage ------------------------------
 // UWECraftingComponent lives on the player character and its RegisteredSourceIds
