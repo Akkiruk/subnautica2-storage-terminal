@@ -48,7 +48,7 @@ void log_line(const std::wstring& message)
 // blank forever.
 bool NoaTerminal::ensure_option_text(UObject* data)
 {
-    if (!data) {
+    if (ReflectionUtils::is_dead(data)) {
         return false;
     }
 
@@ -110,33 +110,54 @@ bool NoaTerminal::ensure_option_text(UObject* data)
 // from evidence. Pure reads, first terminal only, one time.
 void NoaTerminal::log_reference_option_fields(UObject* component)
 {
-    if (m_loggedReferenceFields || !component) {
+    if (m_loggedReferenceFields || ReflectionUtils::is_dead(component)) {
         return;
     }
-    m_loggedReferenceFields = true;
+    // NOT latched here. The array can still be unpopulated on the first rescan
+    // after world load, and latching on that would mean the diagnostic never
+    // runs -- the same "gave up after one attempt" mistake this project has
+    // made three times. The flag is set only once something is actually logged.
 
-    auto* defaults_field = PropertyReflection::find_property(
-        component->GetClassPrivate(), StorageTerminalTargets::kFieldDefaultRootDialogueData);
-    if (!defaults_field) {
-        log_line(L"NoA: no DefaultRootDialogueData to sample.");
+    // Sample ExtraRootDialogueData, NOT DefaultRootDialogueData.
+    //
+    // Confirmed in game (2026-07-30, UE4SS.log line 1052): DefaultRootDialogueData
+    // is EMPTY on these components. The options the player actually sees --
+    // "Missing Colonists", "Survival Guide" and the rest -- live in
+    // ExtraRootDialogueData, which is the very array the mod appends to. So the
+    // game's own working options sit right beside ours, in the same array, and
+    // are the correct reference for which FText field carries the label.
+    auto* extra_field = PropertyReflection::find_property(
+        component->GetClassPrivate(), StorageTerminalTargets::kFieldExtraRootDialogueData);
+    if (!extra_field) {
+        log_line(L"NoA: no ExtraRootDialogueData to sample.");
         return;
     }
 
-    const auto view = PropertyReflection::read_array(defaults_field, reinterpret_cast<uint8_t*>(component));
+    const auto view = PropertyReflection::read_array(extra_field, reinterpret_cast<uint8_t*>(component));
     if (!view || !view->data || view->count <= 0) {
-        log_line(L"NoA: DefaultRootDialogueData is empty; nothing to sample.");
+        log_line(L"NoA: ExtraRootDialogueData is empty; nothing to sample.");
         return;
     }
 
-    const int32_t sample = (view->count < 3) ? view->count : 3;
-    log_line(L"NoA: sampling " + std::to_wstring(sample) + L" of the game's own options to find the label field:");
+    log_line(L"NoA: sampling the game's own options (of " + std::to_wstring(view->count)
+             + L") to find which FText field is the label:");
 
-    for (int32_t index = 0; index < sample; ++index) {
+    int32_t sampled = 0;
+    for (int32_t index = 0; index < view->count && sampled < 4; ++index) {
         UObject* option = nullptr;
         std::memcpy(&option, view->element_at(index), sizeof(option));
-        if (!option) {
+        if (ReflectionUtils::is_dead(option)) {
             continue;
         }
+        // Skip our own options -- they are the ones rendering blank, so they
+        // are the question, not the reference.
+        const bool ours = std::any_of(m_options.begin(), m_options.end(), [&](const TerminalOption& o) {
+            return o.data == option;
+        });
+        if (ours) {
+            continue;
+        }
+        ++sampled;
         auto* option_class = option->GetClassPrivate();
         auto* base = reinterpret_cast<uint8_t*>(option);
 
@@ -148,6 +169,11 @@ void NoaTerminal::log_reference_option_fields(UObject* component)
         log_line(L"  [" + std::to_wstring(index) + L"] InputPrompt='" + read_field(StorageTerminalTargets::kFieldInputPrompt)
                  + L"' InputText='" + read_field(StorageTerminalTargets::kFieldInputText)
                  + L"' ResponseText='" + read_field(StorageTerminalTargets::kFieldResponseText) + L"'");
+    }
+
+    // Latch only on success, so an empty array early in world load is retried.
+    if (sampled > 0) {
+        m_loggedReferenceFields = true;
     }
 }
 
@@ -384,6 +410,13 @@ void NoaTerminal::close_terminal_ui()
         return option.component == component;
     });
     if (!ours) {
+        return;
+    }
+    // The pointer was captured on the game thread when the option was clicked
+    // and is dispatched on here a check later. A terminal destroyed in between
+    // (the player deconstructing it, or a level transition) would otherwise be
+    // ProcessEvent'd after teardown.
+    if (ReflectionUtils::is_dead(component)) {
         return;
     }
 

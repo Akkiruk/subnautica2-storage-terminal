@@ -59,6 +59,23 @@ public:
     // can apply the same filter find_first/find_all use internally.
     static bool is_transient(RC::Unreal::UObject* object);
 
+    // True if `object` is null, being torn down, unreachable, pending kill, or
+    // not yet constructed -- i.e. NOT safe to reflect into.
+    //
+    // Why this exists: this mod pops and opens native screens, and every
+    // enumeration (FindAllOf) hands back widgets and components belonging to
+    // screens that were popped moments ago and are mid-teardown. Reading a
+    // property chain off one of those is the most likely cause of the
+    // browse crash (2026-07-30). Checking flags first is cheap and catches the
+    // whole teardown window.
+    //
+    // HONEST LIMIT: this cannot make a genuinely dangling pointer safe. Once
+    // an object's memory has been freed and reused, its flags describe whatever
+    // now occupies that memory. It closes the realistic window (objects marked
+    // for destruction but not yet collected), which is the window this mod
+    // actually races -- it is not a substitute for not holding stale pointers.
+    static bool is_dead(RC::Unreal::UObject* object);
+
     static RC::Unreal::UFunction* find_function(RC::Unreal::UObject* object, std::wstring_view function_name);
 
     static std::wstring safe_name(RC::Unreal::UObject* object);

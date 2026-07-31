@@ -174,11 +174,21 @@ class StorageTerminalMod final : public CppUserModBase {
     // open_locker. Do not dereference it anywhere that has not just done so.
     UObject* m_ownedScreen = nullptr;
 
-    // The inventory grid on m_ownedScreen. Resolved once per open, never
-    // dereferenced after the screen it belongs to is gone. See
-    // resolve_open_grid().
+    // The inventory grid on m_ownedScreen. Resolved once per open, revalidated
+    // for liveness on every use, never dereferenced after the screen it belongs
+    // to is gone. See resolve_open_grid().
     UObject* m_openGrid = nullptr;
-    bool m_loggedMissingGrid = false;
+
+    // Checks remaining in which to get the search text onto the screen.
+    //
+    // A newly opened screen does not have its grid (or the grid's title block)
+    // ready in the same frame the interact returns, so the single write that
+    // used to follow an open would silently do nothing and the player saw a
+    // plain locker screen with no search state -- "the search disappears after
+    // changing which inventory I'm looking at". Set on every open, switch, and
+    // query change; cleared as soon as update_screen() reports it wrote.
+    int32_t m_textRetryChecks = 0;
+    static constexpr int32_t kTextRetryChecks = 20; // ~3.5s
 
     // The grid we last wrote text into, plus the ShowInventoryTitle value it
     // had before we forced it on, so the flag can be put back.
@@ -661,7 +671,7 @@ class StorageTerminalMod final : public CppUserModBase {
         m_ownedScreen = nullptr;
         m_touchedGrid = nullptr;
         m_openGrid = nullptr;
-        m_loggedMissingGrid = false;
+        m_textRetryChecks = 0;
         m_query.clear();
         m_openInventoryId = -1;
         m_browse.clear();
@@ -685,12 +695,19 @@ class StorageTerminalMod final : public CppUserModBase {
     // Is this the grid bound to `inventory_id`?
     static bool is_grid_for_inventory(UObject* grid, int32_t inventory_id)
     {
+        // Every link in this chain is re-checked for liveness before it is
+        // dereferenced. A widget can be alive while the ViewModel it points at
+        // has already been torn down (the inventory screen's viewmodel rebuilds
+        // itself authoritatively), so checking only the grid is not enough.
+        if (StorageTerminal::ReflectionUtils::is_dead(grid)) {
+            return false;
+        }
         auto* view_model_field = StorageTerminal::PropertyReflection::find_property(
             grid->GetClassPrivate(), StorageTerminalTargets::kFieldViewModel);
         auto* view_model = view_model_field
             ? StorageTerminal::PropertyReflection::read_object(view_model_field, reinterpret_cast<const uint8_t*>(grid))
             : nullptr;
-        if (!view_model) {
+        if (StorageTerminal::ReflectionUtils::is_dead(view_model)) {
             return false;
         }
         auto* bound_field = StorageTerminal::PropertyReflection::find_property(
@@ -698,7 +715,7 @@ class StorageTerminalMod final : public CppUserModBase {
         auto* bound = bound_field
             ? StorageTerminal::PropertyReflection::read_object(bound_field, reinterpret_cast<const uint8_t*>(view_model))
             : nullptr;
-        if (!bound) {
+        if (StorageTerminal::ReflectionUtils::is_dead(bound)) {
             return false;
         }
         auto* id_field = StorageTerminal::PropertyReflection::find_property(
@@ -717,6 +734,12 @@ class StorageTerminalMod final : public CppUserModBase {
         }
         if (widget == screen) {
             return true;
+        }
+        // Both ends are dereferenced below (the screen for its class, the
+        // widget for its outer chain), so both must be live.
+        if (StorageTerminal::ReflectionUtils::is_dead(widget)
+            || StorageTerminal::ReflectionUtils::is_dead(screen)) {
+            return false;
         }
         auto* screen_class = screen->GetClassPrivate();
         return screen_class && widget->GetTypedOuter(screen_class) == screen;
@@ -738,7 +761,10 @@ class StorageTerminalMod final : public CppUserModBase {
         }
 
         for (auto* grid : StorageTerminal::ReflectionUtils::find_all_unfiltered(StorageTerminalTargets::kInventoryWidgetClass)) {
-            if (!grid) {
+            // Liveness FIRST, before any dereference. This enumeration reliably
+            // contains widgets from screens the mod popped moments ago, and
+            // those are precisely the ones being torn down while we look.
+            if (StorageTerminal::ReflectionUtils::is_dead(grid)) {
                 continue;
             }
             // ANCESTRY IS CHECKED FIRST, AND THIS ORDER MATTERS.
@@ -880,29 +906,41 @@ class StorageTerminalMod final : public CppUserModBase {
     // it can never outlive the screen it was found on.
     UObject* resolve_open_grid()
     {
+        // A cached grid is only trusted while it is still alive. The inventory
+        // screen's viewmodel rebuilds itself authoritatively, so the grid can be
+        // replaced WITHOUT the modal screen changing -- in which case
+        // m_ownedScreen still looks correct while this pointer is dead. Drop it
+        // and re-resolve rather than writing text into it.
+        if (m_openGrid && StorageTerminal::ReflectionUtils::is_dead(m_openGrid)) {
+            m_openGrid = nullptr;
+        }
         if (m_openGrid) {
             return m_openGrid;
         }
-        if (!m_ownedScreen) {
+        if (StorageTerminal::ReflectionUtils::is_dead(m_ownedScreen)) {
             return nullptr;
         }
         m_openGrid = find_live_grid(m_openInventoryId, m_ownedScreen);
-        if (!m_openGrid && !m_loggedMissingGrid) {
-            // Once per open, not once per keystroke.
-            m_loggedMissingGrid = true;
-            log(L"Search: no live grid for the open locker; text not written.");
-        }
         return m_openGrid;
     }
 
-    void update_screen()
+    // Writes the search state into the open screen. Returns true only if the
+    // text actually reached a widget.
+    //
+    // The return value matters: right after a locker switch the new screen's
+    // grid often does not exist yet, and a single failed attempt used to mean
+    // the title was simply never written -- the screen sat there with no search
+    // state on it until the player typed or an inventory event fired seconds
+    // later. That is the "search disappears after changing inventory" report.
+    // The caller retries while this returns false; see m_textRetryChecks.
+    bool update_screen()
     {
         if (!m_screenOpen) {
-            return;
+            return false;
         }
         auto* grid = resolve_open_grid();
         if (!grid) {
-            return;
+            return false;
         }
 
         if (grid != m_touchedGrid) {
@@ -917,11 +955,19 @@ class StorageTerminalMod final : public CppUserModBase {
             m_touchedGrid = grid;
         }
 
+        bool wrote_text = false;
         for (const auto candidate : StorageTerminalTargets::kTitleWidgetCandidates) {
-            if (auto* title_widget = find_child_widget(grid, candidate)) {
+            auto* title_widget = find_child_widget(grid, candidate);
+            if (title_widget && !StorageTerminal::ReflectionUtils::is_dead(title_widget)) {
                 set_widget_text(title_widget, build_title());
+                wrote_text = true;
                 break;
             }
+        }
+        if (!wrote_text) {
+            // The grid exists but its title block does not yet. Report failure
+            // so the caller keeps retrying rather than leaving a blank screen.
+            return false;
         }
 
         // The result dump is up to nine formatted lines, and update_screen runs
@@ -936,18 +982,21 @@ class StorageTerminalMod final : public CppUserModBase {
             signature = fnv1a(std::to_wstring(match.count), signature);
         }
         if (signature == m_lastSearchLogSig) {
-            return;
+            return true;
         }
         m_lastSearchLogSig = signature;
 
         log_line(L"Search '" + m_query + L"': " + std::to_wstring(m_matches.size())
                  + L" match(es) across " + std::to_wstring(m_browse.size()) + L" locker(s).");
         log_result_list();
+        return true;
     }
 
     void restore_touched_grid()
     {
-        if (!m_touchedGrid) {
+        if (StorageTerminal::ReflectionUtils::is_dead(m_touchedGrid)) {
+            // Never write a flag back into a widget that is already going away.
+            m_touchedGrid = nullptr;
             return;
         }
         if (auto* show_field = StorageTerminal::PropertyReflection::find_property(
@@ -965,15 +1014,20 @@ class StorageTerminalMod final : public CppUserModBase {
         // The snapshot already holds the live component for every source it
         // scanned, so the common case needs no world scan at all.
         for (const auto& source : m_snapshot.sources()) {
+            // "Fresh" only means the last scan saw it -- up to a couple of
+            // seconds ago. A locker deconstructed since then is still in here,
+            // and open_locker would immediately walk its outer chain. Liveness
+            // is re-checked before the pointer is handed out; a dead one falls
+            // through to the rescan below.
             if (source.inventory_id == inventory_id
-                && source.component
-                && StorageTerminal::InventorySnapshot::is_fresh(source)) {
+                && StorageTerminal::InventorySnapshot::is_fresh(source)
+                && !StorageTerminal::ReflectionUtils::is_dead(source.component)) {
                 return source.component;
             }
         }
 
         for (auto* component : StorageTerminal::ReflectionUtils::find_all(StorageTerminalTargets::kInventoryComponentClass)) {
-            if (!component) {
+            if (StorageTerminal::ReflectionUtils::is_dead(component)) {
                 continue;
             }
             auto* id_field = StorageTerminal::PropertyReflection::find_property(
@@ -1011,8 +1065,10 @@ class StorageTerminalMod final : public CppUserModBase {
         // whether ProcessEvent returned (it always does).
         UObject* const modal_before = active_modal_widget(window_manager);
         auto* target_component = find_component_for_inventory(inventory_id);
-        auto* owner = target_component ? target_component->GetTypedOuter<AActor>() : nullptr;
-        if (!owner) {
+        auto* owner = StorageTerminal::ReflectionUtils::is_dead(target_component)
+            ? nullptr
+            : target_component->GetTypedOuter<AActor>();
+        if (StorageTerminal::ReflectionUtils::is_dead(owner)) {
             log_line(L"Open locker: inventory " + std::to_wstring(inventory_id) + L" not found.");
             return false;
         }
@@ -1026,7 +1082,7 @@ class StorageTerminalMod final : public CppUserModBase {
                 interaction_component = matches[0];
             }
         }
-        if (!interaction_component) {
+        if (StorageTerminal::ReflectionUtils::is_dead(interaction_component)) {
             log_line(L"Open locker: inventory " + std::to_wstring(inventory_id) + L" has no interaction component.");
             return false;
         }
@@ -1078,7 +1134,9 @@ class StorageTerminalMod final : public CppUserModBase {
         // cached pointer here rather than anywhere else, so it is impossible
         // for it to outlive the screen it was resolved on.
         m_openGrid = nullptr;
-        m_loggedMissingGrid = false;
+        // The new screen's grid is usually not ready this frame; keep trying to
+        // put the search text on it until it takes.
+        m_textRetryChecks = kTextRetryChecks;
         m_checksSinceOpen = 0; // start a quiet period
         log_line(L"Opened locker inventory " + std::to_wstring(inventory_id)
                  + L" (" + StorageTerminal::ReflectionUtils::safe_full_name(owner) + L").");
@@ -1279,6 +1337,7 @@ class StorageTerminalMod final : public CppUserModBase {
             request_locker(m_browse[m_browseIndex].inventory_id);
             return;
         }
+        m_textRetryChecks = kTextRetryChecks;
         update_screen();
     }
 
@@ -1452,6 +1511,19 @@ public:
 
         // Keep our idea of the screen honest even when no key is pressed.
         reconcile_screen_state();
+
+        // Keep trying to get the search text onto a freshly opened screen until
+        // it actually lands. Deliberately NOT behind the quiet period below:
+        // that guard exists to stop world-scanning REBUILDS while the UI
+        // settles, whereas this only touches the one screen the mod owns, and
+        // it is precisely during those settling checks that the grid appears.
+        if (m_screenOpen && m_textRetryChecks > 0) {
+            if (update_screen()) {
+                m_textRetryChecks = 0;
+            } else if (--m_textRetryChecks == 0) {
+                log(L"Search: the open screen never exposed a title to write to.");
+            }
+        }
 
         // QUIET PERIOD AFTER OPENING A SCREEN.
         //

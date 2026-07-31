@@ -381,7 +381,11 @@ SnapshotBuildResult SnapshotBuilder::rebuild(InventorySnapshot& out_snapshot)
     }
 
     for (auto* component : components) {
-        if (!component) {
+        // GetItems() is dispatched on this component and its owning actor's
+        // location is read, so a component mid-teardown must be skipped rather
+        // than reflected into. A locker deconstructed during the scan is
+        // exactly this case.
+        if (ReflectionUtils::is_dead(component)) {
             continue;
         }
 
@@ -410,6 +414,9 @@ SnapshotBuildResult SnapshotBuilder::rebuild(InventorySnapshot& out_snapshot)
         source.component = component;
 
         auto* owner = component->GetTypedOuter<AActor>();
+        if (ReflectionUtils::is_dead(owner)) {
+            owner = nullptr;
+        }
 
         if (is_player) {
             source.display_name = L"Carried";

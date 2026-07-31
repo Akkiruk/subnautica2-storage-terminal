@@ -4,6 +4,7 @@
 
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/NameTypes.hpp>
+#include <Unreal/UnrealFlags.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 
 using namespace RC::Unreal;
@@ -68,6 +69,29 @@ bool ReflectionUtils::is_transient(UObject* object)
     return package_name.find(L"/Temp/") != std::wstring::npos
         || package_name.find(L"/Engine/Transient") != std::wstring::npos
         || package_name.find(L"ClientLobby") != std::wstring::npos;
+}
+
+bool ReflectionUtils::is_dead(UObject* object)
+{
+    if (!object) {
+        return true;
+    }
+
+    // RF_BeginDestroyed is set as soon as the engine starts tearing an object
+    // down -- before its subobjects and properties are safe to walk -- so this
+    // catches exactly the window in which a popped screen's widgets are still
+    // enumerable but no longer safe to read.
+    if (object->HasAnyFlags(static_cast<EObjectFlags>(RF_BeginDestroyed | RF_FinishDestroyed))) {
+        return true;
+    }
+
+    // PendingKill: destroyed for gameplay purposes but not yet collected.
+    // Unreachable: GC has already decided nothing references it.
+    // PendingConstruction: memory exists but the class constructor has not run,
+    // so its properties are not initialised yet.
+    return object->HasAnyInternalFlags(EInternalObjectFlags::Unreachable
+                                       | EInternalObjectFlags::PendingKill
+                                       | EInternalObjectFlags::PendingConstruction);
 }
 
 UObject* ReflectionUtils::find_first(std::wstring_view class_name)
