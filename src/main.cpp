@@ -153,6 +153,24 @@ class StorageTerminalMod final : public CppUserModBase {
     int32_t m_pendingLockerChecks = 0;
     static constexpr int32_t kSwitchAfterPopChecks = 10; // give up after ~1.8s
 
+    // DEBOUNCE: where the player wants to be, and when to actually go there.
+    //
+    // Browsing used to pop and re-open a native screen on EVERY keypress. At a
+    // comfortable tapping speed that is 2-3 full screen pop/push cycles per
+    // second, and holding the key for five seconds crashed the game
+    // (crash_2026_07_30_20_46_29) -- with every liveness guard already in
+    // place, which is what rules out our own reflection and points at the
+    // engine's UI stack simply not tolerating that churn.
+    //
+    // So a keypress now only moves the SELECTION and rewrites the title, which
+    // is instant and touches nothing but the screen already open. The actual
+    // switch happens once the player stops pressing. However fast the key is
+    // spammed, that is exactly one pop and one open per burst.
+    int32_t m_desiredLockerId = -1;
+    bool m_switchScheduled = false;
+    std::chrono::steady_clock::time_point m_switchDueAt{};
+    static constexpr int64_t kSwitchIdleMs = 350;
+
     // True while OUR screen is up. Gates the typing capture and the close
     // handler, so keys and Escape behave completely normally otherwise.
     // Always reconciled against the WindowManager before it is trusted --
@@ -521,9 +539,11 @@ class StorageTerminalMod final : public CppUserModBase {
         if (!reconcile_screen_state() || m_browse.empty()) {
             return;
         }
-        // Key repeat would otherwise pop/open a screen every frame.
+        // Bounds how fast the SELECTION moves under key repeat. It no longer
+        // has to protect the screen stack -- the debounce below does that -- so
+        // it can be short enough to feel responsive while scrolling.
         const auto now = std::chrono::steady_clock::now();
-        if (now - m_lastBrowse < std::chrono::milliseconds(250)) {
+        if (now - m_lastBrowse < std::chrono::milliseconds(120)) {
             return;
         }
         m_lastBrowse = now;
@@ -532,10 +552,14 @@ class StorageTerminalMod final : public CppUserModBase {
         m_browseIndex = (m_browseIndex + count + static_cast<size_t>((direction >= 0) ? 1 : -1)) % count;
         log_line(L"Browse " + std::to_wstring(direction) + L": locker "
                  + std::to_wstring(m_browseIndex + 1) + L" of " + std::to_wstring(count) + L".");
-        // Deferred: the replacement screen goes up once the pop has landed, and
-        // update_screen runs from there. Writing text into the current grid here
-        // would be pointless -- it is about to be popped.
-        request_locker(m_browse[m_browseIndex].inventory_id);
+
+        // Move the selection now, switch screens later. The title is rewritten
+        // immediately -- it goes to the screen that is ALREADY open, so it costs
+        // nothing and the player sees the locker name and position update as
+        // they scroll -- while the expensive, crash-prone part (popping and
+        // opening a native screen) waits until they stop pressing.
+        schedule_locker_switch(m_browse[m_browseIndex].inventory_id);
+        update_screen();
     }
 
     // ---- window manager -------------------------------------------------
@@ -679,6 +703,8 @@ class StorageTerminalMod final : public CppUserModBase {
 
         m_pendingLockerId = -1;
         m_pendingLockerChecks = 0;
+        m_desiredLockerId = -1;
+        m_switchScheduled = false;
 
         // The cached player position is only refreshed while the screen is up,
         // so drop it here. Otherwise the next open would rank lockers by
@@ -1152,6 +1178,35 @@ class StorageTerminalMod final : public CppUserModBase {
     // effect yet, so the game ignored the interact ("did not put its screen
     // up"), and by the time the pop did land there was nothing to replace it.
     // Same shape as the NoA open path, which already defers for the same reason.
+    // Records where the player wants to go and restarts the idle timer. Does
+    // NOT touch the screen -- see m_switchScheduled for why.
+    void schedule_locker_switch(int32_t inventory_id)
+    {
+        if (inventory_id < 0) {
+            return;
+        }
+        m_desiredLockerId = inventory_id;
+        m_switchScheduled = true;
+        m_switchDueAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(kSwitchIdleMs);
+    }
+
+    // Performs a scheduled switch once the player has stopped pressing for
+    // kSwitchIdleMs. Never starts one while another is still in flight.
+    void service_scheduled_switch()
+    {
+        if (!m_switchScheduled || m_pendingLockerId >= 0 || !m_screenOpen) {
+            return;
+        }
+        if (std::chrono::steady_clock::now() < m_switchDueAt) {
+            return; // still being spammed; keep waiting
+        }
+
+        m_switchScheduled = false;
+        if (m_desiredLockerId >= 0 && m_desiredLockerId != m_openInventoryId) {
+            request_locker(m_desiredLockerId);
+        }
+    }
+
     void request_locker(int32_t inventory_id)
     {
         if (inventory_id < 0) {
@@ -1333,9 +1388,11 @@ class StorageTerminalMod final : public CppUserModBase {
         // Show the first (nearest) locker that has it, so a search lands you
         // somewhere useful immediately. Deferred for the same reason as browse;
         // update_screen runs when the new screen is actually up.
+        // Same debounce as browsing. Typing "titanium" changed the target
+        // locker on several of those eight keystrokes, and each one used to pop
+        // and re-open a native screen mid-word.
         if (!m_browse.empty() && m_browse[m_browseIndex].inventory_id != m_openInventoryId) {
-            request_locker(m_browse[m_browseIndex].inventory_id);
-            return;
+            schedule_locker_switch(m_browse[m_browseIndex].inventory_id);
         }
         m_textRetryChecks = kTextRetryChecks;
         update_screen();
@@ -1501,6 +1558,9 @@ public:
             ++m_checksSinceOpen;
         }
         ++m_checksSinceRebuild;
+
+        // Act on a scheduled switch once the player has stopped scrolling.
+        service_scheduled_switch();
 
         // Finish any locker switch the player asked for. While one is in flight
         // the Modal layer is legitimately empty, so nothing below should run and
