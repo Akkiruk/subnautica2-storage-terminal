@@ -330,7 +330,14 @@ void SnapshotBuilder::read_items_into(UObject* component, InventorySourceSnapsho
             source.items[existing->second].count += count;
         } else {
             m_foldIndex.emplace(key, source.items.size());
-            source.items.push_back(ItemCount{names->display_name, names->asset_name, count});
+            ItemCount entry{};
+            entry.display_name = names->display_name;
+            entry.asset_name = names->asset_name;
+            // Folded once here rather than on every keystroke in the search.
+            entry.display_lower = to_search_key(entry.display_name);
+            entry.asset_lower = to_search_key(entry.asset_name);
+            entry.count = count;
+            source.items.push_back(std::move(entry));
         }
     }
 }

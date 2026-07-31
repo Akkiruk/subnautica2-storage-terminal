@@ -7,10 +7,9 @@
 // Every game class/function/field name this mod touches, and why it is safe.
 //
 // The mod is read-only apart from opening a locker's native screen (and
-// writing that screen's title/description text, which is cosmetic). Anything
-// here that would move, create, or delete items was removed on 2026-07-28
-// along with the abandoned merged-inventory designs -- see
-// docs/archive/ARCHITECTURE_OPTIONS.md.
+// writing that screen's title text, which is cosmetic). Anything here that
+// would move, create, or delete items was removed on 2026-07-28 along with the
+// abandoned merged-inventory designs.
 //
 // Before adding a new name: check docs/UE4SS_API_REFERENCE.md for whether a
 // real compiled UE4SS function already does the job.
@@ -89,28 +88,26 @@ inline constexpr std::wstring_view kFieldReturnValue = L"ReturnValue";
 inline constexpr uint8_t kStorageScreenLayer = 3; // EUWEWindowManagerLayer::Modal
 
 // --- the open screen's text (cosmetic writes) -----------------------------
-// Used to show the search state and the match list. The widget lives in the
-// transient package too, hence the unfiltered lookup. Writes only ever go to
-// the grid that belongs to the screen currently on the Modal layer: stale
+// Shows the search state in the screen's own title. The widget lives in the
+// transient package, hence the unfiltered lookup. Writes only ever go to the
+// grid belonging to the screen currently on the Modal layer: stale
 // WBP_Inventory_C instances from previous opens stay resolvable for a while
 // and used to receive the same write (observed growing 1 -> 2 -> 3 -> 4
-// across four opens in the 2026-07-28 log).
+// across four opens in the 2026-07-28 log). That grid is now resolved once per
+// open and cached -- see resolve_open_grid() in main.cpp.
 //
-// Name_0 is the title. DescriptionText is a second, larger block on the same
-// screen -- it is what makes a multi-line result list possible at all, rather
-// than cramming everything into one title string. Dumper-7 renames colliding
-// members, so "Name_0" may be plain "Name" at runtime; both are tried.
+// The title is the ONLY text surface the mod touches. A previous build also
+// wrote a multi-line match list into DescriptionText; it rendered outside its
+// container, over the tab bar and inventory header (screenshot, 2026-07-29),
+// so those names were removed rather than left lying around as a temptation.
+// Dumper-7 renames colliding members, so "Name_0" may be plain "Name" at
+// runtime; both are tried.
 inline constexpr std::wstring_view kInventoryWidgetClass = L"WBP_Inventory_C";
 inline constexpr std::wstring_view kFieldViewModel = L"ViewModel";
 inline constexpr std::wstring_view kFieldViewModelInventoryComponent = L"InventoryComponent";
 inline constexpr std::wstring_view kFieldShowInventoryTitle = L"ShowInventoryTitle";
-inline constexpr std::wstring_view kFieldDescriptionText = L"DescriptionText";
-inline constexpr std::wstring_view kFieldDescriptionRoot = L"DescriptionRoot";
 inline constexpr std::wstring_view kSetText = L"SetText";
-inline constexpr std::wstring_view kSetVisibility = L"SetVisibility";
-inline constexpr std::wstring_view kFieldInVisibility = L"InVisibility";
 inline constexpr std::wstring_view kFieldInText = L"InText";
-inline constexpr uint8_t kVisibilityVisible = 0; // ESlateVisibility::Visible
 
 inline constexpr std::array<std::wstring_view, 2> kTitleWidgetCandidates{
     std::wstring_view(L"Name_0"),

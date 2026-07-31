@@ -18,6 +18,9 @@ That is the whole product.
 - **Page Up / Page Down** — walk the lockers holding the current search term,
   nearest first. (Arrow keys are bound too, but the inventory widget consumes
   them for its own grid navigation.)
+  With **no** search term this walks *every* locker, nearest first, **including
+  empty ones** — which are exactly the ones you want when looking for somewhere
+  to put something. Once you type a term, only lockers holding it are listed.
 - **Escape** — close.
 - The open screen's **title** carries one short line:
   `'tita'  Titanium x12  --  Ore Locker 14m  (2/5)`. The full match list goes

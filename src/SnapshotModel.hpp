@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cwctype>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace RC::Unreal {
@@ -27,8 +29,27 @@ struct ItemCount {
     // FText is empty) still finds it.
     std::wstring asset_name;
 
+    // Both names pre-lowercased for searching. The search runs on EVERY
+    // KEYSTROKE over every item in every locker, and it used to lowercase both
+    // names inline -- two string allocations per item per keypress. Folding it
+    // into the snapshot does the work once per rebuild instead.
+    std::wstring display_lower;
+    std::wstring asset_lower;
+
     int32_t count = 0;
 };
+
+// Lowercases a string for case-insensitive search. Shared so the snapshot and
+// the query are always folded the same way -- if these ever diverged, searches
+// would silently miss.
+inline std::wstring to_search_key(std::wstring_view value)
+{
+    std::wstring lowered(value);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(std::towlower(ch));
+    });
+    return lowered;
+}
 
 struct InventorySourceSnapshot {
     int32_t inventory_id = -1;

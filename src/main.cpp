@@ -1,17 +1,27 @@
 // Subnautica 2 -- Storage Network (search & navigate)
 //
 // ARCHITECTURE (Option B, adopted 2026-07-28 after A and C were tested to
-// destruction -- see docs/archive/ARCHITECTURE_OPTIONS.md):
+// destruction):
 //
 //   The mod READS game state and OPENS the game's own storage screens.
 //   It never writes game state, never holds items, never creates inventories.
 //
-// F5 opens a REAL locker's native screen -- the same one the player sees
-// walking up to it. Typing searches every communal locker in the base at
-// once (plus the player's own pockets), the screen reports the matches by
-// locker NAME and distance, and Page Up/Down switch the screen to whichever
-// locker holds what they want. Taking items out is then just the game's own
-// storage screen, which already does that perfectly.
+// Asking NoA at a computer terminal opens a REAL locker's native screen -- the
+// same one the player sees walking up to it. There is deliberately no hotkey.
+// Typing searches every communal locker in the base at once (plus the player's
+// own pockets), the screen reports the matches by locker NAME and distance, and
+// Page Up/Down switch the screen to whichever locker holds what they want.
+// Taking items out is then just the game's own storage screen, which already
+// does that perfectly.
+//
+// THREADING (verified against UE4SS's own event loop, 2026-07-30):
+// UE4SSProgram's loop calls m_input_handler.process_event() and then
+// mod->fire_update() SEQUENTIALLY on one thread, so the key handlers below and
+// on_update() never run concurrently -- the search state needs no locking. The
+// only genuinely cross-thread work is the two ProcessEvent hooks, which fire on
+// the game thread and communicate through atomics (see InventoryEventHook and
+// NoaTerminal). That loop also sleeps 5ms per iteration, which is why a "check"
+// here is ~0.176s and not the ~0.5s the original constants assumed.
 //
 // Why not a merged grid: every design that gave the mod custody of items
 // failed in the save. Copies shared the originals' ItemId GUIDs, corrupting
@@ -150,12 +160,25 @@ class StorageTerminalMod final : public CppUserModBase {
     bool m_screenOpen = false;
 
     // The modal widget that was on top immediately after we opened a locker.
-    // Compared by ADDRESS ONLY, never dereferenced, so a stale pointer is
-    // harmless: if the widget on the Modal layer is no longer this one, the
-    // player closed or replaced our screen and the mod stands down. Without
-    // this, m_screenOpen was a belief that nothing ever checked, and a stale
-    // "true" meant the next Escape popped an unrelated modal.
+    //
+    // Primarily an IDENTITY token: reconcile_screen_state() compares it against
+    // whatever is on the Modal layer, and if they differ the player closed or
+    // replaced our screen and the mod stands down.
+    //
+    // It IS dereferenced in one place -- belongs_to_screen() reads its class to
+    // test widget ancestry. (An older comment here claimed it never was, which
+    // was simply untrue and would have made a stale pointer look safe.) That is
+    // sound only because every path reaching it has just confirmed this pointer
+    // is the live Modal-layer widget: reconcile_screen_state() for the key
+    // handlers and the update loop, and a fresh active_modal_widget() result in
+    // open_locker. Do not dereference it anywhere that has not just done so.
     UObject* m_ownedScreen = nullptr;
+
+    // The inventory grid on m_ownedScreen. Resolved once per open, never
+    // dereferenced after the screen it belongs to is gone. See
+    // resolve_open_grid().
+    UObject* m_openGrid = nullptr;
+    bool m_loggedMissingGrid = false;
 
     // The grid we last wrote text into, plus the ShowInventoryTitle value it
     // had before we forced it on, so the flag can be put back.
@@ -223,7 +246,6 @@ class StorageTerminalMod final : public CppUserModBase {
         double distance = 0.0;
         bool has_distance = false;
         bool is_player = false;
-        bool is_fresh = true;
     };
     std::vector<Match> m_matches;
 
@@ -246,14 +268,6 @@ class StorageTerminalMod final : public CppUserModBase {
     static void log_line(const std::wstring& message)
     {
         Output::send<LogLevel::Verbose>(STR("[StorageTerminal] {}\n"), message);
-    }
-
-    static std::wstring to_lower(std::wstring value)
-    {
-        std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch) {
-            return static_cast<wchar_t>(std::towlower(ch));
-        });
-        return value;
     }
 
     // find_first already excludes the ClientLobby menu world via
@@ -341,7 +355,7 @@ class StorageTerminalMod final : public CppUserModBase {
     void rebuild_matches()
     {
         m_matches.clear();
-        const auto needle = to_lower(m_query);
+        const auto needle = StorageTerminal::to_search_key(m_query);
 
         WorldPoint player{};
         const bool have_player = player_location(player);
@@ -353,10 +367,12 @@ class StorageTerminalMod final : public CppUserModBase {
                 }
                 // Match the player-facing name first; the asset name stays a
                 // secondary key so an item whose FText is empty, or a player
-                // who knows the internal name, still resolves.
+                // who knows the internal name, still resolves. Both are
+                // pre-lowercased in the snapshot, so this is a plain substring
+                // search with no allocation.
                 if (!needle.empty()
-                    && to_lower(item.display_name).find(needle) == std::wstring::npos
-                    && to_lower(item.asset_name).find(needle) == std::wstring::npos) {
+                    && item.display_lower.find(needle) == std::wstring::npos
+                    && item.asset_lower.find(needle) == std::wstring::npos) {
                     continue;
                 }
 
@@ -366,7 +382,6 @@ class StorageTerminalMod final : public CppUserModBase {
                 match.item_name = item.display_name;
                 match.count = item.count;
                 match.is_player = source.is_player;
-                match.is_fresh = StorageTerminal::InventorySnapshot::is_fresh(source);
                 if (have_player && source.has_location && !source.is_player) {
                     const double dx = source.x - player.x;
                     const double dy = source.y - player.y;
@@ -412,7 +427,6 @@ class StorageTerminalMod final : public CppUserModBase {
         row.locker_name = source.display_name;
         row.count = 0;
         row.is_player = source.is_player;
-        row.is_fresh = StorageTerminal::InventorySnapshot::is_fresh(source);
         if (have_player && source.has_location && !source.is_player) {
             const double dx = source.x - player.x;
             const double dy = source.y - player.y;
@@ -646,6 +660,8 @@ class StorageTerminalMod final : public CppUserModBase {
         m_screenOpen = false;
         m_ownedScreen = nullptr;
         m_touchedGrid = nullptr;
+        m_openGrid = nullptr;
+        m_loggedMissingGrid = false;
         m_query.clear();
         m_openInventoryId = -1;
         m_browse.clear();
@@ -852,14 +868,40 @@ class StorageTerminalMod final : public CppUserModBase {
     // description text. The screen belongs to a real locker, so this is
     // cosmetic and transient. Only ever touches the grid on the screen WE
     // opened.
+    // The grid for the currently open screen, resolved at most once per open.
+    //
+    // find_live_grid walks every WBP_Inventory_C in the process, so calling it
+    // from update_screen meant a full object-array scan on EVERY KEYSTROKE --
+    // and it is also the call that has to look at widgets belonging to screens
+    // the mod recently popped. Resolving once per open removes both: the hot
+    // typing path now touches only the one widget it already owns.
+    //
+    // Cleared by forget_screen() and whenever a different locker is opened, so
+    // it can never outlive the screen it was found on.
+    UObject* resolve_open_grid()
+    {
+        if (m_openGrid) {
+            return m_openGrid;
+        }
+        if (!m_ownedScreen) {
+            return nullptr;
+        }
+        m_openGrid = find_live_grid(m_openInventoryId, m_ownedScreen);
+        if (!m_openGrid && !m_loggedMissingGrid) {
+            // Once per open, not once per keystroke.
+            m_loggedMissingGrid = true;
+            log(L"Search: no live grid for the open locker; text not written.");
+        }
+        return m_openGrid;
+    }
+
     void update_screen()
     {
         if (!m_screenOpen) {
             return;
         }
-        auto* grid = find_live_grid(m_openInventoryId, m_ownedScreen);
+        auto* grid = resolve_open_grid();
         if (!grid) {
-            log(L"Search: no live grid for the open locker; text not written.");
             return;
         }
 
@@ -1032,6 +1074,11 @@ class StorageTerminalMod final : public CppUserModBase {
 
         m_ownedScreen = screen;
         m_openInventoryId = inventory_id;
+        // A NEW screen means the previous screen's grid is gone. Drop the
+        // cached pointer here rather than anywhere else, so it is impossible
+        // for it to outlive the screen it was resolved on.
+        m_openGrid = nullptr;
+        m_loggedMissingGrid = false;
         m_checksSinceOpen = 0; // start a quiet period
         log_line(L"Opened locker inventory " + std::to_wstring(inventory_id)
                  + L" (" + StorageTerminal::ReflectionUtils::safe_full_name(owner) + L").");
@@ -1064,6 +1111,11 @@ class StorageTerminalMod final : public CppUserModBase {
         m_pendingLockerChecks = kSwitchAfterPopChecks;
 
         if (!already_pending) {
+            // Put ShowInventoryTitle back BEFORE the screen goes away, while
+            // the widget is still alive and safe to write to. m_touchedGrid
+            // used to survive the switch, so a later close could write the flag
+            // into a widget belonging to a screen that had already been popped.
+            restore_touched_grid();
             pop_modal_screen(find_window_manager());
         }
     }
@@ -1105,11 +1157,12 @@ class StorageTerminalMod final : public CppUserModBase {
         return true;
     }
 
-    // The locker to land on for the current query: the nearest one holding a
-    // match, or -- with no query yet -- simply the nearest locker with
-    // anything in it. It used to be whichever locker held the most stacks,
-    // resolved with >= so ties went to whatever was scanned last, which meant
-    // F5 dropped the player into an arbitrary container.
+    // The locker to land on when the network is opened: the first row of the
+    // browse list (nearest, and with no query that now includes empty lockers),
+    // falling back to a direct scan if the list is somehow empty. It used to be
+    // whichever locker held the most stacks, resolved with >= so ties went to
+    // whatever was scanned last -- which dropped the player into an arbitrary
+    // container.
     int32_t pick_landing_locker()
     {
         if (!m_browse.empty()) {
@@ -1164,7 +1217,9 @@ class StorageTerminalMod final : public CppUserModBase {
 
         const int32_t landing = pick_landing_locker();
         if (landing < 0) {
-            log(L"No communal lockers with anything in them were found.");
+            // Reworded: empty lockers are browsable now, so reaching here means
+            // no communal storage was found AT ALL, not merely none with items.
+            log(L"No communal storage found to open.");
             return;
         }
         if (!open_locker(landing)) {
