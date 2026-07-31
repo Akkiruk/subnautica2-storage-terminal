@@ -15,12 +15,13 @@ That is the whole product.
 - **Type** — search the reachable communal storage plus your own pockets,
   incrementally. Matches the item's localized display name
   (`UUWEItemType::Name`), with the asset name as a secondary key.
-- **Page Up / Page Down** — walk the lockers holding the current search term,
-  nearest first. (Arrow keys are bound too, but the inventory widget consumes
-  them for its own grid navigation.)
+- **Page Up / Page Down, or the arrow keys** — walk the lockers holding the
+  current search term, nearest first.
   With **no** search term this walks *every* locker, nearest first, **including
   empty ones** — which are exactly the ones you want when looking for somewhere
   to put something. Once you type a term, only lockers holding it are listed.
+  Scrolling is instant; the screen itself only switches once you stop pressing,
+  which is deliberate — see `docs/PROJECT.md` §5.
 - **Escape** — close.
 - The open screen's **title** carries one short line:
   `'tita'  Titanium x12  --  Ore Locker 14m  (2/5)`. The full match list goes
