@@ -59,7 +59,8 @@ duplication in normal play. **Do not rebuild them.**
 | `src/InventoryEventHook.*` | "Something changed" signal, nothing more |
 | `src/ReflectionUtils.*`, `src/PropertyReflection.*` | Reflection primitives |
 | `src/HookTargets.hpp` | Every game name used, with why it is safe |
-| `docs/UE4SS_API_REFERENCE.md` | UE4SS's own API: confirmed-safe vs confirmed-fatal calls. **Read before writing reflection code.** |
+| `docs/PROJECT.md` | **Start here.** Goal, non-goals, invariants, what cost a crash to learn, and what is genuinely unresolved. Every claim labelled CONFIRMED / SOURCE / THEORY. |
+| `docs/UE4SS_API_REFERENCE.md` | UE4SS's own API: confirmed-safe vs confirmed-fatal calls, silent-failure traps, and the cost of each lookup primitive. **Read before writing reflection code.** |
 | `docs/REVERSE_ENGINEERING_NOTES.md` | The game's inventory surface |
 
 ## Build

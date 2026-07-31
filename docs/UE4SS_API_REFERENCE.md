@@ -71,6 +71,33 @@ calls must go through `ReflectionUtils::find_function` +
   lookup returns empty for an object you can see in the game, suspect this
   filter first.**
 
+## Reflection calls that fail SILENTLY if you get the receiver wrong
+
+All **CONFIRMED** — each produced a clean "not found" / empty result with no
+error, which is why they were each misdiagnosed as a world-state or timing
+problem first.
+
+- **`GetFunctionByNameInChain` must be called on the INSTANCE, not the class.**
+  It does `GetClassPrivate()` internally, so calling it on a `UClass*` resolves
+  the *metaclass's* functions — always empty. Symptom: every function lookup on
+  every object fails regardless of timing.
+- **To read `TArray<FSomeStruct>`, cast the array's INNER property, not the
+  array property.** `CastField<FStructProperty>(array_property)` always fails;
+  you need `array_property->GetInner()`. Symptom: every element reads back
+  empty even though the array has a real non-zero count.
+- **Property enumeration must walk the chain.** `ForEachProperty()` covers only
+  a struct's own declared properties, so it silently misses fields declared on a
+  base class — which is most live objects, since they are Blueprint subclasses.
+  Use `UStruct::FindProperty` (walks with `IncludeSuper`, and is memoized —
+  see below).
+- **`TWeakObjectPtr` fields are `FWeakObjectProperty`, not `FObjectProperty`.**
+  The backing `FWeakObjectPtr` is an `{ObjectIndex, ObjectSerialNumber}` pair
+  and must be resolved through its own `.Get()`, never read as a raw pointer.
+
+**The pattern:** when a reflection lookup fails *universally* — every object,
+every tick, regardless of world state — suspect the calling convention before
+suspecting game state.
+
 ## Cost of the lookup primitives (read before putting one on a hot path)
 
 Correctness aside, these differ by orders of magnitude. Audited 2026-07-29
