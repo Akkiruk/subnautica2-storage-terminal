@@ -402,6 +402,27 @@ class StorageTerminalMod final : public CppUserModBase {
         rebuild_browse_list();
     }
 
+    // Builds a browse row for a locker, with no particular item attached.
+    Match row_for_source(const StorageTerminal::InventorySourceSnapshot& source,
+                         const WorldPoint& player,
+                         bool have_player) const
+    {
+        Match row{};
+        row.inventory_id = source.inventory_id;
+        row.locker_name = source.display_name;
+        row.count = 0;
+        row.is_player = source.is_player;
+        row.is_fresh = StorageTerminal::InventorySnapshot::is_fresh(source);
+        if (have_player && source.has_location && !source.is_player) {
+            const double dx = source.x - player.x;
+            const double dy = source.y - player.y;
+            const double dz = source.z - player.z;
+            row.distance = std::sqrt((dx * dx) + (dy * dy) + (dz * dz));
+            row.has_distance = true;
+        }
+        return row;
+    }
+
     // Collapses matches to ONE row per locker (a locker either has what you
     // searched for or it does not) and keeps the current locker selected
     // across rebuilds where possible.
@@ -410,15 +431,48 @@ class StorageTerminalMod final : public CppUserModBase {
         const int32_t previously_open = m_openInventoryId;
 
         m_browse.clear();
-        for (const auto& match : m_matches) {
-            if (match.is_player) {
-                continue; // you are already standing in your own inventory
+
+        if (m_query.empty()) {
+            // NO SEARCH TERM: browse every locker, INCLUDING EMPTY ONES.
+            //
+            // This list used to be derived from m_matches, and a match is
+            // produced per ITEM -- so a locker with nothing in it produced no
+            // matches and was simply unreachable. An empty locker is exactly
+            // the one you want to walk to when you are looking for somewhere to
+            // put something, so with no query the browse list is every locker
+            // the snapshot knows about, nearest first.
+            WorldPoint player{};
+            const bool have_player = player_location(player);
+
+            for (const auto& source : m_snapshot.sources()) {
+                if (source.is_player) {
+                    continue; // you are already standing in your own inventory
+                }
+                m_browse.push_back(row_for_source(source, player, have_player));
             }
-            const bool already = std::any_of(m_browse.begin(), m_browse.end(), [&](const Match& row) {
-                return row.inventory_id == match.inventory_id;
+
+            std::sort(m_browse.begin(), m_browse.end(), [](const Match& a, const Match& b) {
+                if (a.has_distance != b.has_distance) {
+                    return a.has_distance;
+                }
+                if (a.has_distance && a.distance != b.distance) {
+                    return a.distance < b.distance;
+                }
+                return a.inventory_id < b.inventory_id;
             });
-            if (!already) {
-                m_browse.push_back(match);
+        } else {
+            // A SEARCH TERM is active, so only lockers that actually hold it
+            // belong here -- an empty locker cannot contain what you searched.
+            for (const auto& match : m_matches) {
+                if (match.is_player) {
+                    continue;
+                }
+                const bool already = std::any_of(m_browse.begin(), m_browse.end(), [&](const Match& row) {
+                    return row.inventory_id == match.inventory_id;
+                });
+                if (!already) {
+                    m_browse.push_back(match);
+                }
             }
         }
 
@@ -661,20 +715,39 @@ class StorageTerminalMod final : public CppUserModBase {
     // the widget currently on the Modal layer is on screen.
     UObject* find_live_grid(int32_t inventory_id, UObject* screen)
     {
-        UObject* fallback = nullptr;
+        // Without a screen to anchor to there is no safe way to tell a live
+        // grid from one belonging to a screen we just popped, so do nothing.
+        if (!screen) {
+            return nullptr;
+        }
+
         for (auto* grid : StorageTerminal::ReflectionUtils::find_all_unfiltered(StorageTerminalTargets::kInventoryWidgetClass)) {
-            if (!grid || !is_grid_for_inventory(grid, inventory_id)) {
+            if (!grid) {
                 continue;
             }
-            if (belongs_to_screen(grid, screen)) {
+            // ANCESTRY IS CHECKED FIRST, AND THIS ORDER MATTERS.
+            //
+            // This enumeration returns every WBP_Inventory_C in the process,
+            // including the ones belonging to screens the mod popped moments
+            // ago and which are being torn down. is_grid_for_inventory walks
+            // grid -> ViewModel -> InventoryComponent -> InventoryId, three
+            // chained reflected reads; doing that to a half-destroyed widget is
+            // the most likely cause of the crash while browsing quickly
+            // (2026-07-30, crash dump written mid-browse). Checking ancestry
+            // first means the deep walk only ever touches widgets that belong
+            // to the screen currently on the Modal layer.
+            if (!belongs_to_screen(grid, screen)) {
+                continue;
+            }
+            if (is_grid_for_inventory(grid, inventory_id)) {
                 return grid;
             }
-            // Later in the global object array means more recently created,
-            // so the last match is the best guess if the ancestry check finds
-            // nothing (e.g. the screen widget could not be resolved).
-            fallback = grid;
         }
-        return fallback;
+
+        // Deliberately NO fallback. The old code kept the last id-matching grid
+        // even when it belonged to no live screen and wrote text into it --
+        // which is precisely how a dying widget got touched.
+        return nullptr;
     }
 
     static void set_widget_text(UObject* widget, const std::wstring& value)
@@ -713,7 +786,21 @@ class StorageTerminalMod final : public CppUserModBase {
     std::wstring build_title() const
     {
         if (m_query.empty()) {
-            return L"STORAGE NETWORK";
+            // No search term: browsing every locker, empty ones included, so
+            // name the one being looked at and its place in the walk.
+            if (m_browse.empty()) {
+                return L"STORAGE NETWORK";
+            }
+            const auto& current = m_browse[std::min(m_browseIndex, m_browse.size() - 1)];
+            std::wstring title = L"STORAGE NETWORK  --  " + current.locker_name;
+            if (current.has_distance) {
+                title += L" " + format_metres(current.distance);
+            }
+            if (m_browse.size() > 1) {
+                title += L"  (" + std::to_wstring(m_browseIndex + 1) + L"/"
+                       + std::to_wstring(m_browse.size()) + L")";
+            }
+            return title;
         }
 
         std::wstring title = L"'" + m_query + L"'";
@@ -965,9 +1052,20 @@ class StorageTerminalMod final : public CppUserModBase {
         if (inventory_id < 0) {
             return;
         }
+        // If a switch is already in flight the Modal layer is already empty --
+        // popping again would be a second pop against whatever landed there.
+        // Retarget instead, so holding Page Down walks the index and only the
+        // locker you stop on is actually opened. Without this, fast browsing
+        // pushed a pop plus a native screen open several times a second, which
+        // is the UI-stack churn this project has crashed on before.
+        const bool already_pending = (m_pendingLockerId >= 0);
+
         m_pendingLockerId = inventory_id;
         m_pendingLockerChecks = kSwitchAfterPopChecks;
-        pop_modal_screen(find_window_manager());
+
+        if (!already_pending) {
+            pop_modal_screen(find_window_manager());
+        }
     }
 
     // Completes a pending switch. Returns true while one is in flight, so the
@@ -1300,9 +1398,23 @@ public:
         // Keep our idea of the screen honest even when no key is pressed.
         reconcile_screen_state();
 
+        // QUIET PERIOD AFTER OPENING A SCREEN.
+        //
+        // This guard was written, documented, and then never actually applied:
+        // m_checksSinceOpen was incremented every check and read by nothing, so
+        // the protection it describes has never once run. Opening a locker
+        // fires inventory events, which set the dirty flag, which rebuilt and
+        // called update_screen() while the screen we had just popped was still
+        // tearing its widgets down -- the crash-while-browsing case.
+        //
+        // Checked BEFORE the exchange below so the dirty flag is not consumed
+        // and thrown away; the rebuild simply happens once things have settled.
+        if (m_checksSinceOpen < kQuietChecksAfterOpen) {
+            return;
+        }
+
         // Only rebuild when something actually changed AND enough time has
-        // passed. Never react while the world is still settling from a
-        // screen we just opened -- that is what closed the loop.
+        // passed.
         const bool changed = m_inventoryDirty.exchange(false, std::memory_order_relaxed);
         if (!changed || m_checksSinceRebuild < kMinChecksBetweenRebuilds) {
             return;

@@ -1,6 +1,7 @@
 #include "NoaTerminal.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -52,30 +53,102 @@ bool NoaTerminal::ensure_option_text(UObject* data)
     }
 
     auto* class_private = data->GetClassPrivate();
+    auto* prompt_field = PropertyReflection::find_property(class_private, StorageTerminalTargets::kFieldInputPrompt);
     auto* input_field = PropertyReflection::find_property(class_private, StorageTerminalTargets::kFieldInputText);
     auto* response_field = PropertyReflection::find_property(class_private, StorageTerminalTargets::kFieldResponseText);
-    if (!input_field) {
+    if (!input_field && !prompt_field) {
         return false;
     }
 
     auto* base = reinterpret_cast<uint8_t*>(data);
 
-    const auto current = PropertyReflection::read_text(input_field, base).value_or(std::wstring{});
-    if (current == kOptionLabel) {
+    const auto current_input = input_field
+        ? PropertyReflection::read_text(input_field, base).value_or(std::wstring{})
+        : std::wstring{};
+    const auto current_prompt = prompt_field
+        ? PropertyReflection::read_text(prompt_field, base).value_or(std::wstring{})
+        : std::wstring{};
+
+    const bool input_ok = !input_field || current_input == kOptionLabel;
+    const bool prompt_ok = !prompt_field || current_prompt == kOptionLabel;
+    if (input_ok && prompt_ok) {
         return true;
     }
 
-    PropertyReflection::write_text(input_field, base, kOptionLabel);
+    // Write BOTH label fields. Only one of them is what WBP_CTI_Button_C
+    // actually renders, and which one is decided in Blueprint bytecode that the
+    // SDK dump does not show. Writing InputText alone produced a blank button
+    // in game more than once, so the label goes in both; whichever the widget
+    // reads, it now finds the right string.
+    if (input_field) {
+        PropertyReflection::write_text(input_field, base, kOptionLabel);
+    }
+    if (prompt_field) {
+        PropertyReflection::write_text(prompt_field, base, kOptionLabel);
+    }
     if (response_field) {
         PropertyReflection::write_text(response_field, base, kOptionResponse);
     }
 
-    const auto after = PropertyReflection::read_text(input_field, base).value_or(std::wstring{});
+    const auto after = input_field
+        ? PropertyReflection::read_text(input_field, base).value_or(std::wstring{})
+        : PropertyReflection::read_text(prompt_field, base).value_or(std::wstring{});
     if (after != kOptionLabel) {
         log_line(L"NoA: option label did not stick (read back '" + after + L"').");
         return false;
     }
     return true;
+}
+
+// Logs what the GAME's own working dialogue options hold in each of the three
+// FText fields, once per session.
+//
+// This exists because the option button kept rendering blank while our write
+// verifiably landed in InputText. Rather than guess again at which field the
+// button binds, this prints the real values from options that DO render
+// ("Missing Colonists", "Survival Guide", ...) so the field can be identified
+// from evidence. Pure reads, first terminal only, one time.
+void NoaTerminal::log_reference_option_fields(UObject* component)
+{
+    if (m_loggedReferenceFields || !component) {
+        return;
+    }
+    m_loggedReferenceFields = true;
+
+    auto* defaults_field = PropertyReflection::find_property(
+        component->GetClassPrivate(), StorageTerminalTargets::kFieldDefaultRootDialogueData);
+    if (!defaults_field) {
+        log_line(L"NoA: no DefaultRootDialogueData to sample.");
+        return;
+    }
+
+    const auto view = PropertyReflection::read_array(defaults_field, reinterpret_cast<uint8_t*>(component));
+    if (!view || !view->data || view->count <= 0) {
+        log_line(L"NoA: DefaultRootDialogueData is empty; nothing to sample.");
+        return;
+    }
+
+    const int32_t sample = (view->count < 3) ? view->count : 3;
+    log_line(L"NoA: sampling " + std::to_wstring(sample) + L" of the game's own options to find the label field:");
+
+    for (int32_t index = 0; index < sample; ++index) {
+        UObject* option = nullptr;
+        std::memcpy(&option, view->element_at(index), sizeof(option));
+        if (!option) {
+            continue;
+        }
+        auto* option_class = option->GetClassPrivate();
+        auto* base = reinterpret_cast<uint8_t*>(option);
+
+        const auto read_field = [&](std::wstring_view name) -> std::wstring {
+            auto* field = PropertyReflection::find_property(option_class, name);
+            return field ? PropertyReflection::read_text(field, base).value_or(std::wstring{}) : std::wstring{L"<no field>"};
+        };
+
+        log_line(L"  [" + std::to_wstring(index) + L"] InputPrompt='" + read_field(StorageTerminalTargets::kFieldInputPrompt)
+                 + L"' InputText='" + read_field(StorageTerminalTargets::kFieldInputText)
+                 + L"' ResponseText='" + read_field(StorageTerminalTargets::kFieldResponseText) + L"'");
+    }
 }
 
 UObject* NoaTerminal::create_option_for(UObject* component)
@@ -159,6 +232,8 @@ int32_t NoaTerminal::refresh_terminals()
             continue;
         }
         auto* base = reinterpret_cast<uint8_t*>(component);
+
+        log_reference_option_fields(component);
 
         // Is this terminal already carrying OUR option? The authoritative test
         // is the component's own array, not our bookkeeping -- the array cannot
